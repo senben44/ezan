@@ -1,0 +1,91 @@
+name: APK derle
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: "3.24.5"
+          cache: true
+
+      # Depoda sadece pubspec.yaml ve lib/ var; Android klasörünü burada üretiyoruz.
+      - name: Android klasörünü oluştur
+        run: |
+          flutter create --platforms=android --project-name ezan_app --org com.ezan "$RUNNER_TEMP/gen"
+          cp -r "$RUNNER_TEMP/gen/android" android
+
+      - name: İzinleri ve bildirim ayarlarını ekle
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+
+          app = pathlib.Path("android/app")
+
+          # AndroidManifest: izinler ve bildirim alıcıları
+          manifest = app / "src/main/AndroidManifest.xml"
+          t = manifest.read_text()
+          perms = """    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+              <uses-permission android:name="android.permission.VIBRATE"/>
+              """
+          receivers = """    <receiver android:exported="false"
+                      android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"/>
+                  <receiver android:exported="false"
+                      android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                      </intent-filter>
+                  </receiver>
+              """
+          if "<application" not in t or "</application>" not in t:
+              sys.exit("AndroidManifest beklenen yapıda değil")
+          t = t.replace("<application", perms + "<application", 1)
+          t = t.replace("</application>", receivers + "</application>", 1)
+          manifest.write_text(t)
+
+          # Gradle: bildirim paketi için core library desugaring
+          kts = app / "build.gradle.kts"
+          groovy = app / "build.gradle"
+          if kts.exists():
+              g = kts.read_text()
+              if "compileOptions {" not in g:
+                  sys.exit("build.gradle.kts içinde compileOptions yok")
+              g = g.replace("compileOptions {",
+                            "compileOptions {\n        isCoreLibraryDesugaringEnabled = true", 1)
+              g += '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
+              kts.write_text(g)
+          else:
+              g = groovy.read_text()
+              if "compileOptions {" not in g:
+                  sys.exit("build.gradle içinde compileOptions yok")
+              g = g.replace("compileOptions {",
+                            "compileOptions {\n        coreLibraryDesugaringEnabled true", 1)
+              g += "\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n}\n"
+              groovy.write_text(g)
+          PY
+
+      - run: flutter pub get
+
+      - run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ezan-app-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
